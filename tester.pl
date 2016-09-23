@@ -10,7 +10,6 @@ use App::cpanminus::reporter;
 use Data::Dumper;
 use Getopt::Long;
 use List::MoreUtils qw( uniq );
-use System::Timeout qw( timeout );
 use Test::Reporter::Transport::File;
 
 # setup variable number of jobs
@@ -22,64 +21,60 @@ GetOptions(
     'verbose' => \$verbose,
 ) or die "wrong Getopt usage \n";
 
-print "\n**********\n";
-print "Starting script\n";
+print "\n**********\n"    if ($verbose);
+print "Starting script\n" if ($verbose);
 system("date");
 
-print "look for group id\n";
-`ps x -o  "%p %r %y %x %c " | grep test27 | grep -v grep`;
+unless ( -d "testlogs" ) {
+    mkdir "testlogs";
+    print "testlogs directory not found, created it\n" if ($verbose);
+}
+
+unless ( -d "reporterlogs" ) {
+    mkdir "reporterlogs";
+    print "reporterlogs directory not found, created it\n" if ($verbose);
+}
+
+unless ( -e "modules_tested.txt" ) {
+    open my $modules_tested_txt_fh, '>', 'modules_tested.txt'
+      or die "can't create modules_tested.txt";
+    close $modules_tested_txt_fh;
+}
 
 # kill previous PID
 # if the script's previous run is still alive, kill it
 if ( -e "testbox_PID" ) {
-    print "fetching previous PID\n";
+    print "fetching previous PID\n" if ($verbose);
     open my $testbox_PID_fh, '<', 'testbox_PID' or die "can't read testbox_PID";
     my $previous_PID = <$testbox_PID_fh>;
-    print "previous PID is $previous_PID\n";
+    print "previous PID is $previous_PID\n" if ($verbose);
     my $previous_testbox_alive = `ps -e | grep -c $previous_PID | grep -v grep`;
-    print "previous testbox alive $previous_testbox_alive\n";
+    print "previous testbox alive $previous_testbox_alive\n" if ($verbose);
 
     if ( $previous_testbox_alive != 0 ) {
-        print "Previous script run still alive, killing it\n";
+        print "Previous script instance still alive, killing it\n"
+          if ($verbose);
 
-        # using -15 is supposed to kill all descendants, kills itself also
+        # using -15 is supposed to kill all descendants, but kills itself also
         system("kill -1 $previous_PID");
         $previous_testbox_alive =
           `ps -e | grep -c $previous_PID | grep -v grep`;
-        print "previous testbox alive $previous_testbox_alive\n";
-
-	print "look for group id after killing previous PID\n";
-	`ps x -o  "%p %r %y %x %c " | grep test27 | grep -v grep`;
-
+        print "previous testbox alive $previous_testbox_alive\n" if ($verbose);
     }
     else {
-        print "Previous script run not running now.\n";
-	
-	print "but look for group id again anyway\n";
-	`ps x -o  "%p %r %y %x %c " | grep test27 | grep -v grep`;
+        print "Previous script run not running now.\n" if ($verbose);
     }
-
     close $testbox_PID_fh;
 }
 
-
 sleep 10;
 
-# save my PID
+# save current PID
 open my $testbox_PID_fh, '>', 'testbox_PID' or die "can't write testbox_PID";
 my $current_PID = $$;
 print $testbox_PID_fh $current_PID;
-print "current PID is $current_PID, saving it\n";
+print "current PID is $current_PID, saving it\n" if ($verbose);
 close $testbox_PID_fh;
-
-# save my GPID
-open my $testbox_GPID_fh, '>>', 'testbox_GPID' or die "can't write test_GPID";
-my $current_GPID = `ps x -o  "%p %r %y %x %c " | grep test27 | grep -v grep`;
-
-my $timestamp = `date`;
-print $testbox_GPID_fh "$current_GPID $timestamp";
-print "current GPID is $current_GPID, saving it\n";
-close $testbox_GPID_fh;
 
 print "starting $jobs jobs\n" if ($verbose);
 
@@ -92,6 +87,17 @@ close $perlrevs_fh;
 print "Perl revisions to test under:\n @revs\n" if ($verbose);
 
 my $Recent = YAML::Load( get("http://www.cpan.org/authors/RECENT.recent") );
+
+########### for testing only ###########
+{
+    ( my $s, my $usec ) = gettimeofday;
+    chomp $s;
+    chomp $usec;
+    my $rcnt = "rcnt" . "$s";
+    LWP::Simple::getstore( "http://www.cpan.org/authors/RECENT.recent",
+        "$rcnt" );
+}
+########### for testing only ###########
 
 LWP::Simple::getstore(
     "http://cpansearch.perl.org/src/ANDK/CPAN-2.10/distroprefs/01.DISABLED.yml",
@@ -116,7 +122,26 @@ if ( -e "last_checked" ) {
 else {
     $last_checked = "0";
 }
+print "getting time of last RECENT file check ", $last_checked, "\n"
+  if ($verbose);
 
+# save timestamp of latest RECENT file check
+( my $s, my $usec ) = gettimeofday;
+chomp $s;
+chomp $usec;
+my $this_check = "$s" . "." . "$usec\n";
+
+open my $last_checked_fh, '>', 'last_checked';
+print $last_checked_fh $this_check;
+close $last_checked_fh;
+
+print "saving current time for future RECENT file check ", $this_check, "\n"
+  if ($verbose);
+print "using previous RECENT file check time for comparison ",
+  $last_checked, "\n"
+  if ($verbose);
+
+# RECENT been updated since last check?
 print "RECENT file updated $last_updated\n" if ($verbose);
 print "RECENT file checked $last_checked\n" if ($verbose);
 print "If negative, check modules ", $last_checked - $last_updated, "\n"
@@ -129,49 +154,57 @@ if ( $last_updated > $last_checked ) {
     for my $recent_entry ( reverse @{ $Recent->{recent} } ) {
 
         # test only files ending in .tar.gz
+        next unless ( $recent_entry->{path} =~ /\.tar\.gz$/ );
+        print "found module $recent_entry->{path}\n" if ($verbose);
 
-        if ( $recent_entry->{path} =~ /\.tar\.gz$/ ) {
-            print "found module $recent_entry->{path}\n" if ($verbose);
-        }
-        else {
-            #	print "do not test $recent_entry->{path}\n" if ($verbose);
-            next;
+        # module already been tested?
+        my $already_tested = 0;
+        open my $modules_tested_txt_fh, '<', 'modules_tested.txt'
+          or die "cannot read modules_tested.txt\n";
+        while (<$modules_tested_txt_fh>) {
+            if (/$recent_entry->{path}/) {
+                close $modules_tested_txt_fh;
+                print "$recent_entry->{path} has been tested, skip it\n"
+                  if ($verbose);
+                $already_tested = 1;
+                last;
+            }
         }
 
-        # test the module if updated since previous check
-        if ( $recent_entry->{epoch} > $last_checked ) {
-            print "updated $recent_entry->{epoch}, testing module\n"
+        if ( $already_tested == 0 ) {
+            close $modules_tested_txt_fh;
+            print "$recent_entry->{path} has not been tested, test it\n"
               if ($verbose);
+
+            # update list of tested modules
+            open my $modules_tested_fh, '>>', 'modules_tested.txt'
+              or die "can't open modules_tested.txt";
+
+            my $timestamp = `date`;
+            ( my $s, my $usec ) = gettimeofday;
+            chomp $s;
+            chomp $usec;
+            my $this_check = "$s" . "." . "$usec\n";
+
+            print $modules_tested_fh
+              "$recent_entry->{path} $this_check $timestamp";
+            close $modules_tested_fh;
+            print
+"added to modules tested list:  $recent_entry->{path} $this_check $timestamp"
+              if ($verbose);
+
             test_module( $recent_entry->{path} );
-        }
-        else {
-            print "module not updated since last check, do not test\n"
-              if ($verbose);
-
-########### for testing only ###########
-            # print ">>>>>>>>>> but test it anyway\n" if ($verbose);
-            # test_module( $recent_entry->{path} );
-########### end for testing only ###########
-
         }
     }
 }
-( my $s, my $usec ) = gettimeofday;
-chomp $s;
-chomp $usec;
-$last_checked = "$s" . "." . "$usec\n";
-
-open my $last_checked_fh, '>', 'last_checked';
-print $last_checked_fh $last_checked;
-close $last_checked_fh;
 
 system("date");
-print "\nExiting script\n\n\n";
+print "\nExiting script\n\n\n" if ($verbose);
 
 sub test_module {
     my ($path) = @_;
 
-    # Use Parallel::ForkManager to test module under each perl version
+    # Use Parallel::ForkManager to test module under each perl version;
     # run $jobs concurrent processes
     my $pm = Parallel::ForkManager->new($jobs);
     foreach my $rev (@revs) {
@@ -182,36 +215,33 @@ sub test_module {
         chomp $name[4];
         my $module = $name[3] . '/' . $name[4];
 
-        open my $disabled_list_fh, '>>', 'disabled_list.txt'
-          or die "can't open disabled_list.txt";
-
-        open my $enabled_list_fh, '>>', 'enabled_list.txt'
-          or die "can't open enabled_list.txt";
-
+        # move this disable/enable code outside of test_module
         # check if this module is included in disabled list
         # if it is, don't test this module
         if ( $module =~ /$Disabled->{match}{distribution}/ ) {
+            open my $disabled_list_fh, '>>', 'disabled_list.txt'
+              or die "can't open disabled_list.txt";
             print $disabled_list_fh "$module \n";
-	    print "$module found in disabled list, do not test\n";
+            close $disabled_list_fh;
+            print "$module found in disabled list, do not test\n" if ($verbose);
             next;
         }
         else {
+            open my $enabled_list_fh, '>>', 'enabled_list.txt'
+              or die "can't open enabled_list.txt";
+            print "$module not found in disabled list, test it\n" if ($verbose);
             print $enabled_list_fh "$module \n";
+            close $enabled_list_fh;
         }
 
-        close $disabled_list_fh;
-        close $enabled_list_fh;
+	# save module with rev number
+	my $module_with_rev = substr( $module, rindex( $module, '/' ) + 1 );
+        $module_with_rev  =~ s/-/::/g;
 
+        # isolate module name
         $module = substr( $module, 0, rindex( $module, '-' ) );
         $module = substr( $module, rindex( $module, '/' ) + 1 );
         $module =~ s/-/::/g;
-
-        # keep a list of tested modules
-        open my $modules_tested_fh, '>>', 'modules_tested.txt'
-          or die "can't open modules_tested.txt";
-        my $timestamp = `date`;
-        print $modules_tested_fh "$module $timestamp";
-        close $modules_tested_fh;
 
         # test the module and report results
         $pm->start and next;
@@ -234,37 +264,36 @@ sub test_module {
 
             print "\n\ntesting $module with $rev\n" if ($verbose);
 
-            my $PERL_CPANM_HOME = "/home/ray/.cpanm/work";
+            my $PERL_CPANM_HOME = "~/.cpanm/work";
             print "cpanm home ", $PERL_CPANM_HOME, "\n" if ($verbose);
 
             # define command where it's used
             my $command = "perlbrew exec --with $rev ";
             $command .= "cpanm --test-only $module ";
-            $command .= "| tee ./testlogs/$module.$rev";
+            $command .= "| tee ./testlogs/$module_with_rev.$rev ";
             system("$command") && check_test_exit($?);
 
             $command = "/usr/local/bin/cpanm-reporter ";
             $command .= "--ignore-versions ";
-            $command .= "| tee ./reporterlogs/$module.$rev ";
+            $command .= "| tee ./reporterlogs/$module_with_rev.$rev ";
 
             system("$command") && check_reporter_exit($?);
         };
         $pm->finish;
     }
     $pm->wait_all_children();
-
 }
 
 sub check_test_exit {
     my ($exit) = @_;
     if ( $exit == -1 ) {
 
-        # hasn't done this yet
+        # haven't seen this during testing
         print "test failed to execute: $!\n";
     }
     elsif ( $exit & 127 ) {
 
-        # hasn't done this yet either
+        # havent't seen this either
         printf "test child died with signal %d, %s coredump\n",
           ( $exit & 127 ), ( $exit & 128 ) ? 'with' : 'without';
     }
